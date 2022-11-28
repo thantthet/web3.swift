@@ -1,19 +1,16 @@
 //
-//  TypedData.swift
-//  web3swift
-//
-//  Created by Miguel on 19/06/2020.
-//  Copyright © 2020 Argent Labs Limited. All rights reserved.
+//  web3.swift
+//  Copyright © 2022 Argent Labs Limited. All rights reserved.
 //
 
-import Foundation
 import BigInt
+import Foundation
 import GenericJSON
 
 /// A type value description
 public struct TypedVariable: Codable, Equatable {
-    let name: String
-    let type: String
+    public var name: String
+    public var type: String
 
     public init(name: String,
                 type: String) {
@@ -24,12 +21,12 @@ public struct TypedVariable: Codable, Equatable {
 
 /// Typed data as per EIP712
 public struct TypedData: Codable, Equatable {
-    public let types: [String: [TypedVariable]]
-    public let primaryType: String
-    public let domain: JSON
-    public let message: JSON
+    public var types: [String: [TypedVariable]]
+    public var primaryType: String
+    public var domain: JSON
+    public var message: JSON
 
-    public init(types: [String : [TypedVariable]],
+    public init(types: [String: [TypedVariable]],
                 primaryType: String,
                 domain: JSON,
                 message: JSON) {
@@ -49,7 +46,7 @@ extension TypedData: CustomStringConvertible {
             let string = String(data: encoded, encoding: .utf8) else {
                 return ""
         }
-        
+
         return string
     }
 }
@@ -74,22 +71,45 @@ extension TypedData {
             let param = types[type]!.map { "\($0.type) \($0.name)" }.joined(separator: ",")
             return "\(type)(\(param))"
         }.joined()
+        
         return encoded.data(using: .utf8) ?? Data()
     }
 
     /// Object encoding as per EIP712
     public func encodeData(data: JSON, type: String) throws -> Data {
         var encoded = try ABIEncoder.encode(encodeType(primaryType: type).web3.keccak256, staticSize: 32).bytes
-        
+
         guard let valueTypes = types[type] else {
             throw ABIError.invalidType
         }
-        
+
         let recursiveEncoded: [UInt8] = try valueTypes.flatMap { variable -> [UInt8] in
-            if types[variable.type] != nil {
+            
+            // Decomposit the type if it is array type
+            let components = variable.type.components(separatedBy: CharacterSet(charactersIn: "[]"))
+            let parsedType = components[0]
+            
+            // Check the type is a custom type
+            if types[parsedType] != nil {
                 guard let json = data[variable.name] else {
                     throw ABIError.invalidValue
                 }
+                
+                // If is custom type array, recursively encode the array
+                if components.count == 3 && components[1].isEmpty {
+                    let encoded = try json.arrayValue!.flatMap { try encodeData(data: $0, type: parsedType).web3.keccak256.web3.bytes }
+                    
+                    return Data(encoded).web3.keccak256.web3.bytes
+                } else if components.count == 3 && !components[1].isEmpty {
+                    let num = String(components[1].filter { "0"..."9" ~= $0 })
+                    guard let int = Int(num), int == json.arrayValue?.count ?? 0 else {
+                        throw ABIError.invalidValue
+                    }
+
+                    let encoded = try json.arrayValue!.flatMap { try encodeData(data: $0, type: parsedType) }
+                    return Data(encoded).web3.keccak256.web3.bytes
+                }
+                
                 return try encodeData(data: json, type: variable.type).web3.keccak256.web3.bytes
             } else if let json = data[variable.name] {
                 return try parseAtomicType(json, type: variable.type)
@@ -99,17 +119,28 @@ extension TypedData {
         }
         
         encoded.append(contentsOf: recursiveEncoded)
-        
+
         return Data(encoded)
+    }
+
+    private func getParsedType(primaryType: String) -> String {
+        // Decomposit the type if it is an array type
+        let components = primaryType.components(separatedBy: CharacterSet(charactersIn: "[]"))
+        let parsedType = components[0]
+        
+        return parsedType
     }
     
     private func findDependencies(primaryType: String, dependencies: Set<String> = Set<String>()) -> Set<String> {
         var found = dependencies
-        guard !found.contains(primaryType),
-            let primaryTypes = types[primaryType] else {
+        
+        let parsedType = getParsedType(primaryType: primaryType)
+        
+        guard !found.contains(parsedType),
+            let primaryTypes = types[parsedType] else {
                 return found
         }
-        found.insert(primaryType)
+        found.insert(parsedType)
         for type in primaryTypes {
             findDependencies(primaryType: type.type, dependencies: found)
                 .forEach { found.insert($0) }
@@ -121,7 +152,7 @@ extension TypedData {
         guard let abiType = ABIRawType(rawValue: type) else {
             throw ABIError.invalidValue
         }
-        
+
         switch abiType {
         case .DynamicString:
             guard let value = data.stringValue?.web3.keccak256 else {
@@ -150,24 +181,25 @@ extension TypedData {
             guard let value = data.boolValue else {
                 throw ABIError.invalidValue
             }
-            
+
             return try ABIEncoder.encode(BigUInt(value ? 1 : 0)).bytes
         case .DynamicArray(let nested):
             guard let value = data.arrayValue else {
                 throw ABIError.invalidValue
             }
-            
+
             let encoded = try value.flatMap { try parseAtomicType($0, type: nested.rawValue) }
+            
             return Data(encoded).web3.keccak256.web3.bytes
         case .FixedArray(let nested, let count):
             guard let value = data.arrayValue else {
                 throw ABIError.invalidValue
             }
-            
+
             guard value.count == count else {
                 throw ABIError.invalidValue
             }
-            
+
             let encoded = try value.flatMap { try parseAtomicType($0, type: nested.rawValue) }
             return Data(encoded).web3.keccak256.web3.bytes
         case .Tuple:
